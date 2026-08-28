@@ -1,0 +1,344 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>הקרנות יומיות</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root { color-scheme: dark; }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #000;
+      color: #fff;
+      font-family: system-ui, -apple-system, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    h1 { margin: 0 0 16px; font-size: 1.4rem; text-align: center; color: #ddd; }
+
+    input[type="file"] {
+      width: 100%; padding: 14px; background: #111; border: 1px solid #444;
+      border-radius: 10px; color: #fff; box-sizing: border-box;
+    }
+
+    #sheets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    #sheets button {
+      background: #111; color: #ddd; border: 1px solid #444;
+      border-radius: 8px; padding: 8px 10px; font-size: 0.95rem;
+    }
+
+    #status { margin: 10px 0; color: #9aa0a6; font-size: 0.95rem; line-height: 1.4; }
+
+    .screening {
+      display: flex; align-items: center; gap: 16px; padding: 18px;
+      margin-bottom: 10px; background: #0a0a0a; border: 1px solid #333; border-radius: 12px;
+      transition: all 0.3s ease;
+    }
+
+    /* State: Checked off manually */
+    .screening.started { border-color: #00c853; background: #04150a; }
+
+    /* State: Playing Right Now */
+    .screening.playing-now { 
+      border-color: #00e5ff; 
+      background: #001822; 
+      box-shadow: 0 0 15px rgba(0, 229, 255, 0.15);
+    }
+
+    /* State: Finished */
+    .screening.past { opacity: 0.35; }
+    .screening.past .title { text-decoration: line-through; }
+
+    .screening input[type="checkbox"] {
+      width: 32px; height: 32px; accent-color: #00c853; flex: 0 0 auto;
+    }
+
+    .screening label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+
+    .title { font-size: 1.15rem; font-weight: 600; line-height: 1.25; }
+    .tags { color: #9aa0a6; font-size: 0.9rem; line-height: 1.25; }
+
+    .time {
+      direction: ltr; unicode-bidi: embed; color: #9aa0a6;
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+
+    #reset {
+      width: 100%; margin-top: 24px; padding: 16px; background: #1a0000;
+      color: #ff5252; border: 1px solid #ff5252; border-radius: 10px;
+      font-size: 1rem; font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <h1>הקרנות יומיות</h1>
+
+  <input type="file" id="file" accept=".xlsx,.xls,.xlsm,.csv">
+
+  <div id="sheets"></div>
+  <div id="status">בחר קובץ Excel יומי</div>
+  <div id="list"></div>
+
+  <button id="reset" onclick="resetList()">איפוס סימונים לגיליון זה</button>
+
+  <script>
+    const FIELD_DEFS = {
+      branch: ["סניף"], date: ["תאריך"], weekday: ["יום בשבוע"], title: ["מופע"],
+      dub: ["דיבוב"], translation: ["תרגום"], time: ["התחלה"], duration: ["משך"],
+      endTime: ["סיום"], hall: ["אולם"], seatingPlan: ["תכנית ישיבה"],
+      distributor: ["מפיץ"], ageLimit: ["מגבלת גיל"], details: ["פרטי"],
+      feature: ["מאפיין"], priceList: ["מחירון"]
+    };
+
+    // Times from 00:00 until 05:59 are treated as after 23:59.
+    const OVERNIGHT_CUTOFF_MINUTES = 6 * 60;
+
+    let workbook = null, baseKey = "", stateKey = "", rows = [], fileName = "", metaText = "";
+
+    const fileEl = document.getElementById("file");
+    const sheetsEl = document.getElementById("sheets");
+    const statusEl = document.getElementById("status");
+    const listEl = document.getElementById("list");
+
+    fileEl.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (typeof XLSX === "undefined") {
+        statusEl.textContent = "ספריית XLSX לא נטענה."; return;
+      }
+
+      fileName = file.name;
+      baseKey = "booth:" + file.name + ":" + file.lastModified;
+
+      try {
+        const buffer = await file.arrayBuffer();
+        workbook = XLSX.read(new Uint8Array(buffer), { type: "array" });
+        e.target.value = "";
+        sheetsEl.innerHTML = "";
+        workbook.SheetNames.forEach((name) => {
+          const btn = document.createElement("button");
+          btn.textContent = name;
+          btn.onclick = () => loadSheet(name);
+          sheetsEl.appendChild(btn);
+        });
+        loadSheet(workbook.SheetNames[0]);
+      } catch (err) {
+        statusEl.textContent = "שגיאה בקריאת הקובץ: " + err.message;
+      }
+    });
+
+    function loadSheet(sheetName) {
+      if (!workbook) return;
+      stateKey = baseKey + ":" + sheetName;
+      const worksheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: false });
+      const firstRow = json[0] || {};
+      const branch = String(getValue(firstRow, FIELD_DEFS.branch) || "").trim();
+      const date = String(getValue(firstRow, FIELD_DEFS.date) || "").trim();
+      metaText = [branch, date].filter(Boolean).join(" — ");
+      rows = normalize(json);
+      render();
+    }
+
+    function normalize(input) {
+      if (!input.length) return [];
+      return input.map((row, index) => {
+        const time = cleanTime(getValue(row, FIELD_DEFS.time));
+        const hall = String(getValue(row, FIELD_DEFS.hall) || "").trim();
+        let title = String(getValue(row, FIELD_DEFS.title) || "").trim();
+        if (!title) title = String(getValue(row, FIELD_DEFS.details) || "").trim();
+        if (!title) title = String(getValue(row, FIELD_DEFS.feature) || "").trim();
+
+        const dub = String(getValue(row, FIELD_DEFS.dub) || "").trim();
+        const translation = String(getValue(row, FIELD_DEFS.translation) || "").trim();
+        const feature = String(getValue(row, FIELD_DEFS.feature) || "").trim();
+        const tags = [dub, translation, feature].filter((v) => v && v !== title).join(" · ");
+
+        const startMins = timeToMinutes(time);
+        let startCinema = startMins;
+        if (startCinema !== null && startCinema < OVERNIGHT_CUTOFF_MINUTES) startCinema += 24 * 60;
+
+        // Calculate End Time in Cinema Minutes
+        let endCinema = null;
+        const rawEnd = cleanTime(getValue(row, FIELD_DEFS.endTime));
+        const rawDur = String(getValue(row, FIELD_DEFS.duration) || "").trim();
+
+        if (rawEnd) {
+          let endCivil = timeToMinutes(rawEnd);
+          if (endCivil !== null) {
+            endCinema = endCivil;
+            if (endCinema < OVERNIGHT_CUTOFF_MINUTES) endCinema += 24 * 60;
+            if (startCinema !== null && endCinema <= startCinema) endCinema += 24 * 60; // Wrapped to next day
+          }
+        }
+
+        if (endCinema === null && rawDur && startCinema !== null) {
+          let durMins = null;
+          const durMatch = rawDur.match(/^(\d{1,2}):(\d{2})$/);
+          if (durMatch) durMins = parseInt(durMatch[1]) * 60 + parseInt(durMatch[2]);
+          else {
+            const pureNum = parseInt(rawDur);
+            if (!isNaN(pureNum) && pureNum > 10 && pureNum < 600) durMins = pureNum;
+          }
+          if (durMins !== null) endCinema = startCinema + durMins;
+        }
+
+        if (endCinema === null && startCinema !== null) endCinema = startCinema + 120; // Fallback 2 hrs
+
+        return {
+          id: [time, hall, title, tags].join("|") || String(index),
+          time, hall, title, tags,
+          startCinema, endCinema
+        };
+      })
+      .filter((row) => row.title || row.time)
+      .sort((a, b) => {
+        const aSort = a.startCinema === null ? 99999 : a.startCinema;
+        const bSort = b.startCinema === null ? 99999 : b.startCinema;
+        return aSort - bSort || String(a.hall).localeCompare(String(b.hall), "he");
+      });
+    }
+
+    function getCurrentCinemaMinutes() {
+      const now = new Date();
+      let mins = now.getHours() * 60 + now.getMinutes();
+      if (mins < OVERNIGHT_CUTOFF_MINUTES) mins += 24 * 60;
+      return mins;
+    }
+
+    function normalizeKey(key) {
+      return String(key || "").replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "").replace(/\s+/g, " ").trim();
+    }
+
+    function getValue(row, names) {
+      const entries = Object.entries(row).map(([k, v]) => [normalizeKey(k), v]);
+      for (const name of names) {
+        const cleanName = normalizeKey(name);
+        const exact = entries.find(([k]) => k === cleanName);
+        if (exact && String(exact[1]).trim() !== "") return exact[1];
+      }
+      for (const name of names) {
+        const cleanName = normalizeKey(name);
+        const partial = entries.find(([k]) => k.includes(cleanName));
+        if (partial && String(partial[1]).trim() !== "") return partial[1];
+      }
+      return "";
+    }
+
+    function cleanTime(value) {
+      if (value === null || value === undefined) return "";
+      if (value instanceof Date) return value.toTimeString().slice(0, 5);
+      const text = String(value).trim();
+      if (!text) return "";
+      const numeric = Number(text.replace(",", "."));
+      if (!isNaN(numeric) && numeric >= 0 && numeric < 1) {
+        const totalMinutes = Math.round(numeric * 24 * 60);
+        return `${String(Math.floor(totalMinutes / 60)).padStart(2, "0")}:${String(totalMinutes % 60).padStart(2, "0")}`;
+      }
+      const asDate = new Date(text);
+      if (!isNaN(asDate.getTime()) && /T/.test(text)) return asDate.toTimeString().slice(0, 5);
+      const match = text.match(/(\d{1,2}):(\d{2})/);
+      if (match) return `${match[1].padStart(2, "0")}:${match[2]}`;
+      return text;
+    }
+
+    function timeToMinutes(time) {
+      const match = String(time).match(/^(\d{1,2}):(\d{2})$/);
+      if (!match) return null;
+      return Number(match[1]) * 60 + Number(match[2]);
+    }
+
+    function readState() { try { return JSON.parse(localStorage.getItem(stateKey) || "{}"); } catch { return {}; } }
+    function writeState(state) { try { localStorage.setItem(stateKey, JSON.stringify(state)); } catch {} }
+
+    function render() {
+      listEl.innerHTML = "";
+      if (!rows.length) { statusEl.textContent = "לא נמצאו שורות."; return; }
+      
+      const state = readState();
+      statusEl.textContent = [fileName, metaText, rows.length + " שורות"].filter(Boolean).join(" | ");
+
+      const nowMins = getCurrentCinemaMinutes();
+
+      rows.forEach((row) => {
+        const checked = Boolean(state[row.id]);
+        const isPlaying = !checked && row.startCinema !== null && nowMins >= row.startCinema && nowMins < row.endCinema;
+        const isPast = !checked && row.endCinema !== null && nowMins >= row.endCinema;
+
+        const item = document.createElement("div");
+        item.className = "screening";
+        if (checked) item.classList.add("started");
+        else if (isPlaying) item.classList.add("playing-now");
+        else if (isPast) item.classList.add("past");
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = checked;
+
+        const label = document.createElement("label");
+        const titleDiv = document.createElement("div");
+        titleDiv.className = "title";
+        titleDiv.textContent = row.title || "(ללא שם מופע)";
+        
+        if (isPlaying) {
+          const badge = document.createElement("span");
+          badge.style.color = "#00e5ff";
+          badge.style.fontSize = "0.9rem";
+          badge.style.fontWeight = "normal";
+          badge.textContent = " (מקרין כעת)";
+          titleDiv.appendChild(badge);
+        }
+
+        label.appendChild(titleDiv);
+        if (row.tags) {
+          const tags = document.createElement("div");
+          tags.className = "tags";
+          tags.textContent = row.tags;
+          label.appendChild(tags);
+        }
+
+        const time = document.createElement("span");
+        time.className = "time";
+        time.textContent = row.time;
+
+        item.appendChild(checkbox);
+        item.appendChild(label);
+        item.appendChild(time);
+
+        checkbox.onclick = (e) => e.stopPropagation();
+        checkbox.onchange = () => toggle(row.id);
+        item.onclick = () => { checkbox.checked = !checkbox.checked; toggle(row.id); };
+
+        listEl.appendChild(item);
+      });
+    }
+
+    function toggle(id) {
+      if (!stateKey) return;
+      const state = readState();
+      state[id] = !state[id];
+      writeState(state);
+      render();
+    }
+
+    function resetList() {
+      if (!stateKey) return;
+      if (confirm("למחוק את כל הסימונים לגיליון זה?")) {
+        localStorage.removeItem(stateKey);
+        render();
+      }
+    }
+
+    // Initial render
+    render();
+    // Update "Now Playing" status every 30 seconds
+    setInterval(render, 30000);
+  </script>
+</body>
+</html>
