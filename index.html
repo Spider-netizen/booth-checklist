@@ -257,6 +257,22 @@
     function readState() { try { return JSON.parse(localStorage.getItem(stateKey) || "{}"); } catch { return {}; } }
     function writeState(state) { try { localStorage.setItem(stateKey, JSON.stringify(state)); } catch {} }
 
+    function formatHall(hall) {
+      let h = String(hall || "")
+        .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+        .trim();
+
+      if (!h) return "";
+
+      h = h.replace(/\.0+$/, "");
+
+      if (/^\d+$/.test(h)) {
+        return `אולם ${h}`;
+      }
+
+      return h;
+    }
+
     function render() {
       listEl.innerHTML = "";
       if (!rows.length) { statusEl.textContent = "לא נמצאו שורות."; return; }
@@ -284,7 +300,13 @@
         const label = document.createElement("label");
         const titleDiv = document.createElement("div");
         titleDiv.className = "title";
-        titleDiv.textContent = row.title || "(ללא שם מופע)";
+
+        const hallText = formatHall(row.hall);
+        const titleText = row.title || "(ללא שם מופע)";
+
+        titleDiv.textContent = hallText
+          ? `${hallText} — ${titleText}`
+          : titleText;
         
         if (isPlaying) {
           const badge = document.createElement("span");
