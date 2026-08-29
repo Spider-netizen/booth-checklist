@@ -98,8 +98,9 @@
 
     // Times from 00:00 until 05:59 are treated as after 23:59.
     const OVERNIGHT_CUTOFF_MINUTES = 6 * 60;
+    const SCHEDULE_STORAGE_KEY = "booth_last_schedule_v1";
 
-    let workbook = null, baseKey = "", stateKey = "", rows = [], fileName = "", metaText = "";
+    let workbook = null, baseKey = "", stateKey = "", rows = [], fileName = "", metaText = "", scheduleNote = "";
 
     const fileEl = document.getElementById("file");
     const sheetsEl = document.getElementById("sheets");
@@ -143,6 +144,8 @@
       const date = String(getValue(firstRow, FIELD_DEFS.date) || "").trim();
       metaText = [branch, date].filter(Boolean).join(" — ");
       rows = normalize(json);
+      scheduleNote = "";
+      saveCurrentSchedule();
       render();
     }
 
@@ -257,6 +260,46 @@
     function readState() { try { return JSON.parse(localStorage.getItem(stateKey) || "{}"); } catch { return {}; } }
     function writeState(state) { try { localStorage.setItem(stateKey, JSON.stringify(state)); } catch {} }
 
+    function saveCurrentSchedule() {
+      if (!stateKey || !rows.length) return;
+
+      try {
+        localStorage.setItem(SCHEDULE_STORAGE_KEY, JSON.stringify({
+          stateKey,
+          fileName,
+          metaText,
+          rows,
+          savedAt: new Date().toISOString()
+        }));
+      } catch (err) {
+        // Ignore storage failures.
+      }
+    }
+
+    function loadSavedSchedule() {
+      try {
+        const raw = localStorage.getItem(SCHEDULE_STORAGE_KEY);
+        if (!raw) return false;
+
+        const saved = JSON.parse(raw);
+
+        if (!saved || !Array.isArray(saved.rows) || !saved.rows.length) {
+          return false;
+        }
+
+        rows = saved.rows;
+        stateKey = saved.stateKey || ("booth:saved:" + (saved.savedAt || Date.now()));
+        fileName = saved.fileName || "";
+        metaText = saved.metaText || "";
+        scheduleNote = "לוח אחרון";
+
+        render();
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }
+
     function formatHall(hall) {
       let h = String(hall || "")
         .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
@@ -278,7 +321,7 @@
       if (!rows.length) { statusEl.textContent = "לא נמצאו שורות."; return; }
       
       const state = readState();
-      statusEl.textContent = [fileName, metaText, rows.length + " שורות"].filter(Boolean).join(" | ");
+      statusEl.textContent = [scheduleNote, fileName, metaText, rows.length + " שורות"].filter(Boolean).join(" | ");
 
       const nowMins = getCurrentCinemaMinutes();
 
@@ -357,8 +400,11 @@
       }
     }
 
-    // Initial render
-    render();
+    // Restore last schedule if available, otherwise show empty state.
+    if (!loadSavedSchedule()) {
+      render();
+    }
+
     // Update "Now Playing" status every 30 seconds
     setInterval(render, 30000);
   </script>
